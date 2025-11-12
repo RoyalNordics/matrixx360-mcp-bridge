@@ -1,5 +1,5 @@
 {
-  "version": "4.0",
+  "version": "4.1",
   "name": "MatriXx360 Auto-Runner Task Plan",
   "spec_reference": "./docs/matrixx360_master_spec.md",
   "policies": {
@@ -46,7 +46,12 @@
       "max_retries": 3,
       "on_fail": "self_repair_and_retry"
     },
-    "frontend_build": "(cd web && npm run build)"
+    "frontend_build": "(cd web && npm run build)",
+    "summary_policy": {
+      "file_path": "docs/BUILD_SUMMARY.md",
+      "per_task_entry_template": "### {timestamp} — {id} {title}\\n- Phase: {phase}\\n- Status: {status}\\n- Tests: {tests_passed}/{tests_total} green\\n- Coverage: {coverage_pct}%\\n- Files changed: {files_changed}\\n- Commit: {commit_sha}\\n- Notes: {notes}\\n",
+      "final_summary_template": "# MatriXx360 Build Summary (So Far)\\n\\n**Current Phase:** {current_phase}\\n**Total Tasks:** {completed_tasks}/{total_tasks} complete\\n**Tests:** {total_green}/{total_tests} green\\n**Coverage:** {coverage_pct}%\\n**Last Commit:** {last_commit_sha}\\n\\n## Recent Entries\\n{recent_entries}\\n\\n## Open Issues\\n{open_issues}\\n"
+    }
   },
   "tooling": {
     "commit_tool": "git_commit_and_push",
@@ -275,7 +280,7 @@
       ],
       "assert": [
         "201 ved gyldige assignments.",
-        "Precies domænefejlkoder ved mismatch/duplikat primær."
+        "Præcise domænefejlkoder ved mismatch/duplikat primær."
       ]
     },
     {
@@ -464,12 +469,13 @@
         "(changed_web==true) ? \"(cd web && npm run build)\" : \"echo skip web build\""
       ],
       "if_green_then": [
+        "generate_per_task_summary_entry_using(summary_policy.per_task_entry_template) -> append_to(summary_policy.file_path)",
         {
           "tool": "git_commit_and_push",
           "with": {
             "branch": "main",
             "commitMessage": "Auto-commit: {id} — {title} ✅",
-            "files": "{all_modified_files_with_full_paths_and_updated_content}"
+            "files": "{all_modified_files_with_full_paths_and_updated_content_including(summary_policy.file_path)}"
           }
         },
         {
@@ -479,11 +485,22 @@
         }
       ],
       "if_red_then": [
+        "capture_errors_to_notes",
+        "generate_per_task_summary_entry_using(summary_policy.per_task_entry_template_with_status_failed) -> append_to(summary_policy.file_path)",
         "attempt_self_repair",
         "retry_up_to_max_retries"
       ]
     },
     "finalize": [
+      "generate_final_summary_using(summary_policy.final_summary_template) -> write_to(summary_policy.file_path)",
+      {
+        "tool": "git_commit_and_push",
+        "with": {
+          "branch": "main",
+          "commitMessage": "Auto-commit: G0 — Build Summary update 📘",
+          "files": "{ensure_includes(summary_policy.file_path)}"
+        }
+      },
       "echo System Complete",
       "print_changed_files_summary",
       "print_test_summary",
