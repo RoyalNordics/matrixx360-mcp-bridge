@@ -1,0 +1,493 @@
+{
+  "version": "4.0",
+  "name": "MatriXx360 Auto-Runner Task Plan",
+  "spec_reference": "./docs/matrixx360_master_spec.md",
+  "policies": {
+    "error_contract": {
+      "shape": {
+        "ok": false,
+        "errors": [
+          {
+            "code": "STRING",
+            "field": "STRING|NULL",
+            "message": "STRING"
+          }
+        ]
+      },
+      "http_mapping": {
+        "NOT_FOUND": 404,
+        "UNAUTHORIZED": 401,
+        "FORBIDDEN": 403,
+        "VALIDATION_ERROR": 422,
+        "CONFLICT": 409,
+        "INTERNAL_ERROR": 500
+      }
+    },
+    "rbac_headers": {
+      "tenant": "x-tenant-id",
+      "role": "x-user-role"
+    },
+    "commit_policy": {
+      "branch": "main",
+      "when": [
+        "on_task_complete",
+        "on_modified_files>=5"
+      ],
+      "message_template": "Auto-commit: {id} — {title} ✅"
+    },
+    "deploy_policy": {
+      "enabled": true,
+      "trigger": "after_commit",
+      "require_coverage_pct": 80
+    },
+    "test_loop": {
+      "typecheck_cmd": "npm run typecheck",
+      "test_cmd": "npm run test",
+      "max_retries": 3,
+      "on_fail": "self_repair_and_retry"
+    },
+    "frontend_build": "(cd web && npm run build)"
+  },
+  "tooling": {
+    "commit_tool": "git_commit_and_push",
+    "deploy_tool": "render_deploy"
+  },
+  "tasks": [
+    {
+      "id": "A1",
+      "title": "Bootstrap repository structure",
+      "intent": "Sørg for standard projektstruktur matcher spec’en.",
+      "steps": [
+        "Opret mapper: src/routes, src/controllers, src/middleware, src/utils, src/types, src/tests, src/prisma, docs, web (hvis ikke eksisterer).",
+        "Tilføj README med projektoversigt og hurtig start.",
+        "Placer/valider docs/matrixx360_master_spec.md."
+      ],
+      "files_expect": [
+        "README.md",
+        "docs/matrixx360_master_spec.md"
+      ],
+      "run": [
+        "npm install",
+        "npm run typecheck || true"
+      ],
+      "assert": [
+        "Sørg for at alle mapper findes.",
+        "README har Quick Start og Development-sektion."
+      ]
+    },
+    {
+      "id": "A2",
+      "title": "Prisma schema v1 (multi-tenant core)",
+      "intent": "Definér tenants, customers, locations, vendors, documents, service modules, transitions.",
+      "steps": [
+        "Design prisma/schema.prisma i overensstemmelse med spec_reference.",
+        "Alle tabelrækker skal have tenantId (FK til Tenant) for isolation.",
+        "Tilføj nødvendige enum’er: ModuleStatus, DocStatus, VendorStatus, TransitionStatus, Criticality.",
+        "Sæt relations, cascading der hvor sikkert og restrictive ellers."
+      ],
+      "files_expect": [
+        "src/prisma/schema.prisma"
+      ],
+      "run": [
+        "npx prisma generate",
+        "npx prisma migrate dev --name init",
+        "npm run typecheck"
+      ],
+      "assert": [
+        "Prisma migrates uden fejl.",
+        "Alle nøglemodeller og enum’er findes."
+      ]
+    },
+    {
+      "id": "A3",
+      "title": "Seed data v1",
+      "intent": "Realistisk FM seed: én tenant, 1–2 customers, locations, vendors (PREFERRED/APPROVED), service modules, transitions.",
+      "steps": [
+        "Tilføj src/prisma/seed.ts med realistiske data fra spec.",
+        "Indsæt minimum ét modul pr. lokation og matching vendor competencies.",
+        "Sørg for docStatus varierer (OK, MISSING, EXPIRED, PENDING)."
+      ],
+      "files_expect": [
+        "src/prisma/seed.ts"
+      ],
+      "run": [
+        "npm run db:seed || node ./src/prisma/seed.ts",
+        "npm run typecheck"
+      ],
+      "assert": [
+        "Seed indsætter data uden runtime-fejl.",
+        "Mindst 1 ACTIVE modul eksisterer."
+      ]
+    },
+    {
+      "id": "B1",
+      "title": "Express bootstrap + server",
+      "intent": "Opsæt Express server, middlewares, health route, prisma client init.",
+      "steps": [
+        "Opret src/index.ts med app, health-check GET /health.",
+        "Tilføj prisma client og graceful shutdown.",
+        "Tilføj cors, json body parser, request id."
+      ],
+      "files_expect": [
+        "src/index.ts",
+        "src/middleware/requestId.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run dev & sleep 2; kill %1 || true"
+      ],
+      "assert": [
+        "GET /health returnerer 200.",
+        "Typecheck uden fejl."
+      ]
+    },
+    {
+      "id": "B2",
+      "title": "Auth & RBAC middleware",
+      "intent": "Header-baseret tenant/role validering og scoping.",
+      "steps": [
+        "Implementér middleware for x-tenant-id og x-user-role.",
+        "Afvis manglende/ugyldige headers med 401/403 i error_contract format.",
+        "Tilføj helper som automatisk filtrerer requests på tenantId i alle repo-kald."
+      ],
+      "files_expect": [
+        "src/middleware/auth.ts",
+        "src/utils/tenantScope.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test || true"
+      ],
+      "assert": [
+        "Requests uden headers giver 401.",
+        "Requests med ugyldig role giver 403."
+      ]
+    },
+    {
+      "id": "C1",
+      "title": "Error handling pipeline",
+      "intent": "Global errorMap → {ok:false, errors:[...]}; Zod→422; notFound→404.",
+      "steps": [
+        "Tilføj asyncHandler, validate(zodSchema) og errorMap som sidste middleware.",
+        "Standardiser alle fejl til error_contract.",
+        "Sørg for logisk 404 vs 422 mapping."
+      ],
+      "files_expect": [
+        "src/middleware/errorMap.ts",
+        "src/middleware/validate.ts",
+        "src/utils/httpErrors.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test || true"
+      ],
+      "assert": [
+        "Valideringsfejl giver 422 med korrekt shape.",
+        "Ukendte ressourcer giver 404."
+      ]
+    },
+    {
+      "id": "C2",
+      "title": "Routes: customers, locations, vendors (CRUD)",
+      "intent": "Implementér REST-CRUD med Zod validation, tenant-scope og delete-guards.",
+      "steps": [
+        "Opret routes/controllers for customers, locations og vendors.",
+        "Indsæt FK-checks (fx no orphaned locations).",
+        "Sørg for pagination og filtrering hvor relevant."
+      ],
+      "files_expect": [
+        "src/routes/customers.ts",
+        "src/routes/locations.ts",
+        "src/routes/vendors.ts",
+        "src/controllers/customers.ts",
+        "src/controllers/locations.ts",
+        "src/controllers/vendors.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "CRUD kaldes succesfuldt i integrationstests.",
+        "FK-guards virker (422/409 ved brud)."
+      ]
+    },
+    {
+      "id": "C3",
+      "title": "Routes: service modules (CRUD + docs + logs)",
+      "intent": "Alle servicemodul-operationer inkl. dokumentkrav og servicelog.",
+      "steps": [
+        "Opret routes/controllers for service modules.",
+        "Understøt dokumenters status, næste service og servicelog-historik.",
+        "Zod skemaer for creation/update."
+      ],
+      "files_expect": [
+        "src/routes/modules.ts",
+        "src/controllers/modules.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "Create/Update/Read/Delete virker med tenant-scope.",
+        "Zod fejl → 422 i korrekt format."
+      ]
+    },
+    {
+      "id": "C4",
+      "title": "Module activation workflow",
+      "intent": "POST /modules/:id/activate med readiness-checks.",
+      "steps": [
+        "Implementér readiness: docStatus=OK, primary vendor sat, næste service planlagt >= i dag.",
+        "Returnér 200 ved success; 422 med domænekoder ved brud (fx DOCS_PENDING, PRIMARY_MISSING)."
+      ],
+      "files_expect": [
+        "src/routes/modulesActions.ts",
+        "src/services/moduleReadiness.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "Aktivering lykkes på gyldige moduler.",
+        "Korrekte domænefejlkoder for afviste aktiveringer."
+      ]
+    },
+    {
+      "id": "C5",
+      "title": "Vendor assignments",
+      "intent": "POST /vendors/:id/assignments – match kompetencer, primær kun én.",
+      "steps": [
+        "Valider kompetence-match til modul kategori.",
+        "Primær assignment (ACTIVE) må kun eksistere én pr. modul.",
+        "Returnér 201 ved success; 422 'CAPABILITY_MISMATCH'/'PRIMARY_EXISTS'."
+      ],
+      "files_expect": [
+        "src/routes/vendorAssignments.ts",
+        "src/controllers/vendorAssignments.ts",
+        "src/services/vendorMatch.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "201 ved gyldige assignments.",
+        "Precies domænefejlkoder ved mismatch/duplikat primær."
+      ]
+    },
+    {
+      "id": "D1",
+      "title": "Dashboard & compliance endpoints",
+      "intent": "Aggregator for KPI/SLA, doc-status, overdue services, transition-readiness.",
+      "steps": [
+        "Implementér GET /dashboard/compliance (tenant scoped).",
+        "Beregn complianceScore og counters.",
+        "Tilføj CSV export endpoint."
+      ],
+      "files_expect": [
+        "src/routes/dashboard.ts",
+        "src/controllers/dashboard.ts",
+        "src/utils/csv.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "Compliance svarer med aggregerede nøgletal.",
+        "CSV export returnerer gyldig CSV."
+      ]
+    },
+    {
+      "id": "D2",
+      "title": "Transitions workflow endpoints",
+      "intent": "Opret/track transitions pr. kunde/lokation og gate ‘READY’.",
+      "steps": [
+        "POST/GET/PUT /transitions.",
+        "READY kun når alle moduler = ACTIVE og docStatus=OK.",
+        "Returnér 200/422 efter kontrakten."
+      ],
+      "files_expect": [
+        "src/routes/transitions.ts",
+        "src/controllers/transitions.ts",
+        "src/services/transitionGate.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "Gate-regler håndhæves korrekt.",
+        "Integrationstests grønne."
+      ]
+    },
+    {
+      "id": "E1",
+      "title": "Settings: categories, validation templates & roles",
+      "intent": "Admin endpoints til at styre kategorier og påkrævede felter pr. kategori.",
+      "steps": [
+        "CRUD for service categories, vendor categories.",
+        "Validation templates: requiredFields pr. kategori.",
+        "RBAC: kun ADMIN må ændre settings."
+      ],
+      "files_expect": [
+        "src/routes/settings.ts",
+        "src/controllers/settings.ts"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "ADMIN kræves for write.",
+        "Templates anvendes i create/update af moduler."
+      ]
+    },
+    {
+      "id": "E2",
+      "title": "Docs & API reference",
+      "intent": "Opdater README og ARCHITECTURE, generér OpenAPI (om muligt).",
+      "steps": [
+        "Udbyg README med auth-headers, error contract, flows.",
+        "ARCHITECTURE.md med data- og ruteoversigt.",
+        "Tilføj evt. openapi.json (manuelt eller generator)."
+      ],
+      "files_expect": [
+        "README.md",
+        "ARCHITECTURE.md",
+        "openapi.json"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "Docs beskriver alle moduler og flows.",
+        "openapi.json matcher ruter hvis inkluderet."
+      ]
+    },
+    {
+      "id": "F1",
+      "title": "Web app: scaffold & auth integration",
+      "intent": "Vite React TS app med routing, auth-context (headers) og fælles UI-komponenter.",
+      "steps": [
+        "Opret web/ (hvis ikke findes) med Vite React TS.",
+        "Tilføj AuthProvider der sætter x-tenant-id og x-user-role.",
+        "Læg UI: Breadcrumbs, StatusBadge, ErrorSummary."
+      ],
+      "files_expect": [
+        "web/index.html",
+        "web/src/main.tsx",
+        "web/src/App.tsx",
+        "web/src/components/*",
+        "web/src/providers/AuthProvider.tsx"
+      ],
+      "run": [
+        "cd web && npm install",
+        "cd web && npm run build"
+      ],
+      "assert": [
+        "App bygger uden fejl.",
+        "Auth headers sendes i fetch-klient."
+      ]
+    },
+    {
+      "id": "F2",
+      "title": "Web app: pages & flows",
+      "intent": "Pages for Customers, Locations, Modules, Vendors, Transitions, Dashboard.",
+      "steps": [
+        "Implementér liste/detalje/edit-sider pr. entitet.",
+        "Forms valideres client-side mod samme felter som Zod skemaer (spejling).",
+        "Transitions-wizard til READY- gate."
+      ],
+      "files_expect": [
+        "web/src/pages/*",
+        "web/src/routes.tsx"
+      ],
+      "run": [
+        "cd web && npm run build"
+      ],
+      "assert": [
+        "Alle sider loader og kan CRUD’e mod API.",
+        "Transitions-wizard kan gennemføre READY."
+      ]
+    },
+    {
+      "id": "F3",
+      "title": "E2E tests (Playwright fallback)",
+      "intent": "Headless UI-tests af hovedflows (uden ‘Computer Use’).",
+      "steps": [
+        "Installer Playwright i web/ og skriv scenarier: create customer → add location → add module → assign vendor → activate → READY.",
+        "Kør i CI-lignende flow lokalt."
+      ],
+      "files_expect": [
+        "web/tests/e2e/*.spec.ts"
+      ],
+      "run": [
+        "cd web && npx playwright install",
+        "cd web && npm run test:e2e || npx playwright test"
+      ],
+      "assert": [
+        "Hovedscenarier passerer end-to-end.",
+        "Fejl rapporteres med skærmbilleder (trace)."
+      ]
+    },
+    {
+      "id": "G1",
+      "title": "CI hooks (optional)",
+      "intent": "Tilføj GitHub Actions (hvis ønsket) for typecheck/test/build på push.",
+      "steps": [
+        "Opret .github/workflows/ci.yml der kører typecheck + test + web build.",
+        "Cache node_modules hvor muligt."
+      ],
+      "files_expect": [
+        ".github/workflows/ci.yml"
+      ],
+      "run": [
+        "npm run typecheck",
+        "npm run test"
+      ],
+      "assert": [
+        "YAML syntaks korrekt.",
+        "Workflow kan køre lokalt (tør-run)."
+      ]
+    }
+  ],
+  "executor": {
+    "on_each_task": {
+      "sequence": [
+        "npm run typecheck",
+        "npm run test",
+        "(changed_web==true) ? \"(cd web && npm run build)\" : \"echo skip web build\""
+      ],
+      "if_green_then": [
+        {
+          "tool": "git_commit_and_push",
+          "with": {
+            "branch": "main",
+            "commitMessage": "Auto-commit: {id} — {title} ✅",
+            "files": "{all_modified_files_with_full_paths_and_updated_content}"
+          }
+        },
+        {
+          "when": "deploy_policy.enabled==true",
+          "tool": "render_deploy",
+          "with": {}
+        }
+      ],
+      "if_red_then": [
+        "attempt_self_repair",
+        "retry_up_to_max_retries"
+      ]
+    },
+    "finalize": [
+      "echo System Complete",
+      "print_changed_files_summary",
+      "print_test_summary",
+      "print_next_steps"
+    ]
+  }
+}
