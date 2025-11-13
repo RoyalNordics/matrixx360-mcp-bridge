@@ -1,116 +1,155 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import dotenv from "dotenv";
-import simpleGit from "simple-git";
-
-dotenv.config();
+import { exec } from "child_process";
+import util from "util";
 
 const app = express();
+const PORT = process.env.PORT || 10000;
+
+const asyncExec = util.promisify(exec);
+
+// ====== MIDDLEWARE ======
 app.use(cors());
 app.use(bodyParser.json());
 
-// Git config from Render environment variables
-const GITHUB_OWNER = process.env.GITHUB_OWNER;
-const GITHUB_PAT = process.env.GITHUB_PAT;
-const GITHUB_REPO = process.env.GITHUB_REPO;
-
-// ===============================
-//  MCP TOOL DEFINITIONS
-// ===============================
-
-const tools = {
-  health_check: {
-    name: "health_check",
-    description: "Verify that the MCP server is online.",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: []
-    }
-  },
-
-  git_commit_and_push: {
-    name: "git_commit_and_push",
-    description: "Commit & push files to GitHub repo defined by environment vars.",
-    parameters: {
-      type: "object",
-      properties: {
-        branch: { type: "string" },
-        commitMessage: { type: "string" },
-        files: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              path: { type: "string" },
-              content: { type: "string" }
-            },
-            required: ["path", "content"]
-          }
+// ===== MCP SCHEMA (Required by OpenAI) =====
+app.get("/schema", (req, res) => {
+  res.json({
+    version: "1.0",
+    name: "matrixx360_mcp_bridge",
+    tools: [
+      {
+        name: "health_check",
+        description: "Check if the MCP Bridge server is alive.",
+        input_schema: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false
         }
       },
-      required: ["branch", "commitMessage", "files"]
-    }
-  }
-};
-
-// ===============================
-//  TOOL CALL HANDLER
-// ===============================
-
-app.post("/mcp", async (req, res) => {
-  const { tool, input } = req.body;
-
-  try {
-    if (tool === "health_check") {
-      return res.json({ ok: true, message: "MCP server online" });
-    }
-
-    if (tool === "git_commit_and_push") {
-      const { branch, commitMessage, files } = input;
-
-      const git = simpleGit();
-
-      // Clone if not cloned
-      const repoUrl = `https://${GITHUB_PAT}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-      await git.clone(repoUrl, "/tmp/repo");
-      await git.cwd("/tmp/repo");
-
-      // Write files
-      const fs = await import("fs");
-      for (const f of files) {
-        const filePath = `/tmp/repo/${f.path}`;
-        fs.writeFileSync(filePath, f.content, "utf8");
+      {
+        name: "git_commit_and_push",
+        description: "Commit and push files to the configured GitHub repository.",
+        input_schema: {
+          type: "object",
+          properties: {
+            branch: { type: "string" },
+            commitMessage: { type: "string" },
+            files: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  path: { type: "string" },
+                  content: { type: "string" }
+                },
+                required: ["path", "content"],
+                additionalProperties: false
+              }
+            }
+          },
+          required: ["branch", "commitMessage", "files"],
+          additionalProperties: false
+        }
+      },
+      {
+        name: "render_deploy",
+        description: "Trigger a new deploy on a Render web service.",
+        input_schema: {
+          type: "object",
+          properties: {
+            serviceId: { type: "string" }
+          },
+          required: ["serviceId"],
+          additionalProperties: false
+        }
       }
+    ]
+  });
+});
 
-      // Commit & push
-      await git.add(".");
-      await git.commit(commitMessage);
-      await git.push("origin", branch);
+// ===== HEALTH CHECK =====
+app.post("/tools/health_check", async (req, res) => {
+  res.json({
+    ok: true,
+    message: "MCP Bridge is alive",
+    timestamp: new Date().toISOString()
+  });
+});
 
-      return res.json({ ok: true, message: "Committed & pushed successfully" });
+// ===== GIT COMMIT & PUSH =====
+app.post("/tools/git_commit_and_push", async (req, res) => {
+  try {
+    const { branch, commitMessage, files } = req.body;
+
+    const owner = process.env.GITHUB_OWNER;
+    const repo = process.env.GITHUB_REPO;
+    const pat = process.env.GITHUB_PAT;
+
+    if (!owner || !repo || !pat) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing GitHub environment variables"
+      });
     }
 
-    return res.status(400).json({ ok: false, error: "Unknown tool" });
+    // Write files to repo
+    for (const file of files) {
+      await asyncExec(`mkdir -p ${file.path.substring(0, file.path.lastIndexOf("/"))}`);
+      await asyncExec(`echo "${file.content.replace(/"/g, '\\"')}" > ${file.path}`);
+    }
 
+    // Git commands
+    await asyncExec("git config user.email 'autobot@matrixx360.com'");
+    await asyncExec("git config user.name 'Matrixx360-AutoBuilder'");
+
+    await asyncExec(`git add .`);
+    await asyncExec(`git commit -m "${commitMessage}"`);
+    await asyncExec(
+      `git push https://${owner}:${pat}@github.com/${owner}/${repo}.git ${branch}`
+    );
+
+    res.json({ ok: true, message: "Commit & push successful" });
   } catch (err) {
-    console.error("MCP error:", err);
-    return res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// ===============================
-//  MCP TOOL LIST ENDPOINT
-// ===============================
+// ===== RENDER DEPLOY =====
+app.post("/tools/render_deploy", async (req, res) => {
+  try {
+    const { serviceId } = req.body;
+    const renderKey = process.env.RENDER_API_KEY;
 
-app.get("/tools", (req, res) => {
-  res.json({ tools: Object.values(tools) });
+    if (!renderKey) {
+      return res.status(500).json({
+        ok: false,
+        error: "Missing RENDER_API_KEY"
+      });
+    }
+
+    const response = await fetch(`https://api.render.com/v1/services/${serviceId}/deploys`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${renderKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ clearCache: true })
+    });
+
+    const data = await response.json();
+    res.json({ ok: true, deploy: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
-// ===============================
-//  START SERVER
-// ===============================
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`MCP bridge running on port ${port}`));
+// ===== START SERVER =====
+app.listen(PORT, () => {
+  console.log("============================================");
+  console.log("🟢 MCP Bridge running");
+  console.log(`🔗 URL: http://localhost:${PORT}`);
+  console.log("============================================");
+});
