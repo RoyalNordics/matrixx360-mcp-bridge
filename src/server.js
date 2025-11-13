@@ -1,155 +1,100 @@
+// src/server.js
+// Proper MCP HTTP server with a simple health_check tool
+
 import express from "express";
-import cors from "cors";
-import bodyParser from "body-parser";
-import { exec } from "child_process";
-import util from "util";
+import { z } from "zod";
+import {
+  McpServer,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
+import { 
+  StreamableHTTPServerTransport 
+} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+
+// Create MCP server instance
+const server = new McpServer({
+  name: "matrixx360-bridge",
+  version: "1.0.0",
+});
+
+// --- TOOLS ------------------------------------------------------
+
+// Simple health check tool so OpenAI can verify the bridge
+server.registerTool(
+  "health_check",
+  {
+    title: "Health check",
+    description: "Returns basic status for the MatriXx360 MCP bridge.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      status: z.string(),
+      uptimeSeconds: z.number(),
+      timestamp: z.string(),
+    }),
+  },
+  async () => {
+    const output = {
+      status: "ok",
+      uptimeSeconds: process.uptime(),
+      timestamp: new Date().toISOString(),
+    };
+
+    return {
+      // What shows up in the model’s text view
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(output, null, 2),
+        },
+      ],
+      // Structured result for the MCP client
+      structuredContent: output,
+    };
+  }
+);
+
+// --- HTTP TRANSPORT --------------------------------------------
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+app.use(express.json());
 
-const asyncExec = util.promisify(exec);
-
-// ====== MIDDLEWARE ======
-app.use(cors());
-app.use(bodyParser.json());
-
-// ===== MCP SCHEMA (Required by OpenAI) =====
-app.get("/schema", (req, res) => {
-  res.json({
-    version: "1.0",
-    name: "matrixx360_mcp_bridge",
-    tools: [
-      {
-        name: "health_check",
-        description: "Check if the MCP Bridge server is alive.",
-        input_schema: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false
-        }
-      },
-      {
-        name: "git_commit_and_push",
-        description: "Commit and push files to the configured GitHub repository.",
-        input_schema: {
-          type: "object",
-          properties: {
-            branch: { type: "string" },
-            commitMessage: { type: "string" },
-            files: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  path: { type: "string" },
-                  content: { type: "string" }
-                },
-                required: ["path", "content"],
-                additionalProperties: false
-              }
-            }
-          },
-          required: ["branch", "commitMessage", "files"],
-          additionalProperties: false
-        }
-      },
-      {
-        name: "render_deploy",
-        description: "Trigger a new deploy on a Render web service.",
-        input_schema: {
-          type: "object",
-          properties: {
-            serviceId: { type: "string" }
-          },
-          required: ["serviceId"],
-          additionalProperties: false
-        }
-      }
-    ]
-  });
+// Root endpoint – just for manual browser check
+app.get("/", (_req, res) => {
+  res.type("text/plain").send(
+    "MatriXx360 MCP Bridge is running. MCP endpoint: POST /mcp"
+  );
 });
 
-// ===== HEALTH CHECK =====
-app.post("/tools/health_check", async (req, res) => {
-  res.json({
-    ok: true,
-    message: "MCP Bridge is alive",
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ===== GIT COMMIT & PUSH =====
-app.post("/tools/git_commit_and_push", async (req, res) => {
+// Main MCP endpoint – this is what OpenAI connects to
+app.post("/mcp", async (req, res) => {
   try {
-    const { branch, commitMessage, files } = req.body;
-
-    const owner = process.env.GITHUB_OWNER;
-    const repo = process.env.GITHUB_REPO;
-    const pat = process.env.GITHUB_PAT;
-
-    if (!owner || !repo || !pat) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing GitHub environment variables"
-      });
-    }
-
-    // Write files to repo
-    for (const file of files) {
-      await asyncExec(`mkdir -p ${file.path.substring(0, file.path.lastIndexOf("/"))}`);
-      await asyncExec(`echo "${file.content.replace(/"/g, '\\"')}" > ${file.path}`);
-    }
-
-    // Git commands
-    await asyncExec("git config user.email 'autobot@matrixx360.com'");
-    await asyncExec("git config user.name 'Matrixx360-AutoBuilder'");
-
-    await asyncExec(`git add .`);
-    await asyncExec(`git commit -m "${commitMessage}"`);
-    await asyncExec(
-      `git push https://${owner}:${pat}@github.com/${owner}/${repo}.git ${branch}`
-    );
-
-    res.json({ ok: true, message: "Commit & push successful" });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ===== RENDER DEPLOY =====
-app.post("/tools/render_deploy", async (req, res) => {
-  try {
-    const { serviceId } = req.body;
-    const renderKey = process.env.RENDER_API_KEY;
-
-    if (!renderKey) {
-      return res.status(500).json({
-        ok: false,
-        error: "Missing RENDER_API_KEY"
-      });
-    }
-
-    const response = await fetch(`https://api.render.com/v1/services/${serviceId}/deploys`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${renderKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ clearCache: true })
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
     });
 
-    const data = await response.json();
-    res.json({ ok: true, deploy: data });
+    res.on("close", () => {
+      transport.close();
+    });
+
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    console.error("Error handling MCP request:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "MCP server error" });
+    }
   }
 });
 
-// ===== START SERVER =====
-app.listen(PORT, () => {
-  console.log("============================================");
-  console.log("🟢 MCP Bridge running");
-  console.log(`🔗 URL: http://localhost:${PORT}`);
-  console.log("============================================");
-});
+const port = parseInt(process.env.PORT || "10000", 10);
+
+app
+  .listen(port, () => {
+    console.log(
+      `MatriXx360 MCP Bridge running on http://localhost:${port}/mcp`
+    );
+  })
+  .on("error", (error) => {
+    console.error("Server error:", error);
+    process.exit(1);
+  });
